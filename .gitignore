@@ -1,0 +1,6 @@
+venv
+__pycache__
+.vscode
+chroma_db
+reports
+uploads
