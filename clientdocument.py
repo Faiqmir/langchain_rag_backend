@@ -24,6 +24,7 @@ from langchain_core.prompts import PromptTemplate
 
 # Text cleaning utilities
 from text_cleaning import normalize_text, early_normalize_chunk
+from costing_agent import generate_costing
 
 # ------------------------------
 # Setup Logging
@@ -341,7 +342,8 @@ def generate_report_json(context: str, instruction: str | None = None) -> dict |
     # Remove possible code fences
     raw_text = re.sub(r"```json\s*\n?", "", raw_text, flags=re.IGNORECASE)
     raw_text = re.sub(r"```\s*\n?", "", raw_text)
-
+    raw_text = re.sub(r"```[^`]*?```", "", raw_text, flags=re.DOTALL)
+    
     # Try to locate JSON object
     match = re.search(r"\{[\s\S]*\}", raw_text)
     if not match:
@@ -710,10 +712,11 @@ def write_pdf(report_text: str, output_file: str, json_data: dict | None = None)
     logger.info(f"📘 PDF saved to {output_file}")
 
 
-def write_pdf_from_json(report_json: dict, output_file: str):
+def write_pdf_from_json(report_json: dict, output_file: str, costing_json: dict | None = None):
     """
     Generate a nicely formatted PDF from structured JSON report data.
     Uses title, sections, subsections, and optional table_data.
+    If costing_json is provided, also render a "Costing Estimate" section at the end.
     """
     doc = SimpleDocTemplate(
         output_file,
@@ -831,8 +834,89 @@ def write_pdf_from_json(report_json: dict, output_file: str):
 
         story.append(Spacer(1, 12))
 
+    # Optional costing section appended after main report
+    if isinstance(costing_json, dict) and costing_json:
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("<b>Costing Estimate</b>", heading_style))
+        story.append(Spacer(1, 6))
+
+        scope_raw = str(costing_json.get("development_scope", ""))
+        scope_label = "International team" if scope_raw.lower() == "international" else "Local team"
+        project_type = str(costing_json.get("project_type", "")).replace("_", " ")
+
+        scope_line = f"Scope: <b>{scope_label}</b>  |  Project type: <b>{project_type}</b>"
+        story.append(Paragraph(scope_line, normal_style))
+        story.append(Spacer(1, 4))
+
+        total_cost = costing_json.get("total_estimated_cost")
+        currency = str(costing_json.get("currency", ""))
+        team_size = costing_json.get("developer_count")
+        duration = costing_json.get("assumed_duration_months")
+
+        if total_cost is not None:
+            meta_parts: list[str] = []
+            if team_size is not None:
+                meta_parts.append(f"team size: {team_size}")
+            if duration is not None:
+                meta_parts.append(f"duration: {duration} months")
+            meta_suffix = f" ({', '.join(meta_parts)})" if meta_parts else ""
+            total_line = f"Estimated total: <b>{total_cost} {currency}</b>{meta_suffix}"
+            story.append(Paragraph(total_line, normal_style))
+            story.append(Spacer(1, 6))
+
+        summary_text = costing_json.get("natural_language_summary")
+        if isinstance(summary_text, str) and summary_text.strip():
+            story.append(Paragraph(summary_text.strip(), normal_style))
+            story.append(Spacer(1, 8))
+
+        items = costing_json.get("items") or []
+        if isinstance(items, list) and items:
+            table_data: list[list[str]] = [["Role", "Qty", "Monthly rate", "Months", "Subtotal"]]
+            for item in items:
+                role = str(item.get("role", ""))
+                qty = str(item.get("quantity", ""))
+                monthly_rate = item.get("monthly_rate")
+                duration_months = item.get("duration_months")
+                subtotal = item.get("subtotal")
+
+                mr_str = f"{monthly_rate} {currency}" if monthly_rate is not None else ""
+                sub_str = f"{subtotal} {currency}" if subtotal is not None else ""
+
+                table_data.append([
+                    role,
+                    qty,
+                    mr_str,
+                    str(duration_months) if duration_months is not None else "",
+                    sub_str,
+                ])
+
+            table = Table(table_data)
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTSIZE", (0, 0), (-1, 0), 11),
+                        ("BOTTOMPADDING", (0, 0), (-1, 0), 10),
+                        ("BACKGROUND", (0, 1), (-1, -1), colors.beige),
+                        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                        ("FONTSIZE", (0, 1), (-1, -1), 9),
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ]
+                )
+            )
+            story.append(table)
+            story.append(Spacer(1, 12))
+
     doc.build(story)
     logger.info(f"📘 JSON-based PDF saved to {output_file}")
+
 
 # ------------------------------
 # Core Processing Entry Point
@@ -863,7 +947,10 @@ def process_document(
     mode: str = "master",
     developer_count: int = 1,
     project_budget: float = 5000.0,
-) -> Tuple[str, dict | None]:
+    development_scope: str = "local",
+    currency: str = "PKR",
+    project_type: str = "web_app",
+) -> Tuple[str, dict | None, dict | None]:
     """
     Run the end-to-end pipeline: load requirements, generate report, persist embeddings.
 
@@ -873,9 +960,10 @@ def process_document(
         instruction: Optional custom instruction from user.
 
     Returns:
-        Tuple of (pdf_path, json_data) where:
+        Tuple of (pdf_path, json_data, costing_json) where:
         - pdf_path: The path to the generated PDF report
         - json_data: Extracted JSON schema (dict) if found, None otherwise (can be used with pdf-kit for tables)
+        - costing_json: Structured costing information, if available
     """
     if not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -899,6 +987,16 @@ def process_document(
         project_budget=project_budget,
     )
 
+    # Step 2b: Costing Agent
+    costing_json = generate_costing(
+        context=augmented_context,
+        development_scope=development_scope,
+        currency=currency,
+        project_type=project_type,
+        developer_count=developer_count,
+        project_budget=project_budget,
+    )
+
     # Step 3: Try JSON-first report generation
     report_json = generate_report_json(augmented_context, instruction=instruction)
 
@@ -906,7 +1004,7 @@ def process_document(
 
     if report_json:
         # Step 4a: Save Report as PDF using structured JSON
-        write_pdf_from_json(report_json, str(output_path))
+        write_pdf_from_json(report_json, str(output_path), costing_json=costing_json)
 
         # Build a flattened text representation for embeddings
         flat_parts: list[str] = []
@@ -924,7 +1022,6 @@ def process_document(
             p for p in flat_parts if isinstance(p, str) and p.strip()
         )
         table_json_for_response = extract_table_objects_from_json_report(report_json)
-        json_data_for_legacy = None
     else:
         # Step 4b: Fallback to legacy text pipeline
         logger.info("↩️ Falling back to legacy text-based report generation...")
@@ -942,8 +1039,8 @@ def process_document(
 
     logger.info("🎯 Process complete — Report generated and indexed.")
 
-    # Return both the PDF path and JSON data for table generation
-    return str(output_path), table_json_for_response
+    # Return both the PDF path, JSON data for table generation, and costing details
+    return str(output_path), table_json_for_response, costing_json
 
 
 # ------------------------------

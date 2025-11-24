@@ -46,6 +46,9 @@ async def process_upload(
     mode: str = Form("master"),
     developer_count: int = Form(1),
     project_budget: float = Form(5000),
+    development_scope: str = Form("local"),
+    currency: str = Form("PKR"),
+    project_type: str = Form("web_app"),
 ):
     ...
     logger.info("Received instruction: %r", instruction)
@@ -67,13 +70,16 @@ async def process_upload(
             shutil.copyfileobj(file.file, buffer)
         logger.info("📥 Received upload %s", upload_path)
 
-        generated_report, json_data = process_document(
+        generated_report, json_data, costing_json = process_document(
             str(upload_path),
             str(report_path),
             instruction=instruction or None,
             mode=mode,
             developer_count=developer_count,
             project_budget=project_budget,
+            development_scope=development_scope,
+            currency=currency,
+            project_type=project_type,
         )
         logger.info("📤 Generated report %s", generated_report)
         if json_data:
@@ -97,6 +103,10 @@ async def process_upload(
     # Include JSON data if available (for table generation with pdf-kit)
     if json_data:
         response["json_data"] = json_data
+
+    # Include costing JSON if available
+    if costing_json:
+        response["costing"] = costing_json
     
     return response
 
