@@ -84,31 +84,37 @@ def _build_user_prompt(
     fixed_budget: Optional[float],
 ) -> str:
     trimmed_context = (context or "")[:6000]
+    
+    # Create budget text based on whether budget is provided
+    budget_text = f"{fixed_budget} {currency_key}" if fixed_budget is not None else "to be estimated based on project complexity"
+    timeline_text = f"EXACTLY {timeline_weeks} weeks" if timeline_weeks is not None else "to be estimated based on project complexity"
+    
     return f"""
 You are a project cost analyst. Generate a project cost estimate based on the provided constraints.
 
-PROJECT SETTINGS:
+PROJECT SETTINGS (MUST FOLLOW EXACTLY):
 - Development scope: {scope_key}
-- Currency: {currency_key}
+- Currency: {currency_key} (ALL monetary values must be in this currency)
 - Project type: {project_type_key}
 - Resources: {resources_needed if resources_needed else 'Estimate based on project needs'}
-- Timeline: {timeline_weeks if timeline_weeks else 'Estimate based on project complexity'} weeks
-- Technical Hourly Rate: {technical_hourly_rate if technical_hourly_rate else 'Estimate based on market rates'} {currency_key}
-- Non-Technical Hourly Rate: {non_technical_hourly_rate if non_technical_hourly_rate else 'Estimate based on market rates'} {currency_key}
-- Fixed Budget Limit: {fixed_budget if fixed_budget else 'No limit'} {currency_key}
+- Timeline: {timeline_text} ({"THIS IS NOT A SUGGESTION - USE THIS EXACT TIMELINE" if timeline_weeks is not None else "Estimate based on project complexity"})
+- Technical Hourly Rate: {technical_hourly_rate if technical_hourly_rate is not None else 'Estimate based on market rates'} {currency_key}
+- Non-Technical Hourly Rate: {non_technical_hourly_rate if non_technical_hourly_rate is not None else 'Estimate based on market rates'} {currency_key}
+- Fixed Budget Limit: {budget_text}
 
 CONTEXT:
 {trimmed_context}
 
-RULES:
+CRITICAL REQUIREMENTS:
 1. If resources are provided, create exactly that many team members
-2. If timeline is provided, use exactly that duration
-3. If rates are provided, use exactly those rates
-4. If any values are not provided, estimate them reasonably based on project type and scope
-5. Total cost MUST NOT exceed fixed budget if provided
+2. {"If timeline is provided, use exactly that duration" if timeline_weeks is not None else "Estimate timeline based on project complexity"}
+3. {"If rates are provided, use exactly those rates" if technical_hourly_rate is not None or non_technical_hourly_rate is not None else "Estimate rates based on market rates and project type"}
+4. {"If any values are not provided, estimate them reasonably based on project type and scope" if any([resources_needed, timeline_weeks, technical_hourly_rate, non_technical_hourly_rate, fixed_budget]) is not None else "Estimate all values reasonably based on project type and scope"}
+5. {"Total cost MUST NOT exceed fixed budget if provided" if fixed_budget is not None else "Estimate total cost based on project complexity"}
 6. Distribute roles appropriately for {project_type_key}
 7. Each member works 40 hours/week
 8. ALL monetary values must be in {currency_key}
+9. {"Do not use default values - use only the values provided above" if any([resources_needed, timeline_weeks, technical_hourly_rate, non_technical_hourly_rate, fixed_budget]) is not None else "Estimate all values based on project complexity"}
 
 REQUIRED JSON OUTPUT:
 {{
@@ -207,6 +213,7 @@ def _apply_constraints(
 ) -> Dict[str, Any]:
     """
     Apply user constraints to the payload with proper cost calculations.
+    Only enforce constraints for values that were actually provided by the user.
     """
     payload = dict(payload)  # Shallow copy
     items = payload.get("items", [])
@@ -218,6 +225,7 @@ def _apply_constraints(
     if timeline_weeks is not None:
         for it in items:
             it["duration_weeks"] = timeline_weeks
+            logger.info(f"Enforced timeline constraint: {timeline_weeks} weeks for {it.get('role')}")
     
     # Enforce resource count: adjust number of items to resources_needed
     if resources_needed is not None:
@@ -365,6 +373,7 @@ def generate_costing(
         logger.error("Invalid input: %s", ve)
         raise
 
+    # Don't filter out None values - let LLM estimate them
     technical_hourly_rate = _ensure_positive_or_none(technical_hourly_rate)
     non_technical_hourly_rate = _ensure_positive_or_none(non_technical_hourly_rate)
     timeline_weeks = _ensure_positive_int_or_none(timeline_weeks)
@@ -405,7 +414,7 @@ def generate_costing(
         logger.warning("Failed to extract JSON from LLM response")
         return {}
 
-    # Apply constraints
+    # Apply constraints (only for values that were provided)
     final_payload = _apply_constraints(
         payload=parsed,
         timeline_weeks=timeline_weeks,

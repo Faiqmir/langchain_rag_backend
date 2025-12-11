@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import hashlib
+import re
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any, List
 from dataclasses import dataclass
@@ -45,7 +46,6 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 class ProcessingMode(str, Enum):
     MASTER = "master"
-    MVP = "mvp"
 
 class DocumentType(str, Enum):
     PDF = "pdf"
@@ -71,6 +71,7 @@ class ProcessingRequest(BaseModel):
     mode: ProcessingMode = Field(default=ProcessingMode.MASTER)
     developer_count: int = Field(default=1, gt=0)
     project_budget: float = Field(default=5000.0, gt=0)
+    timeline_weeks: Optional[int] = Field(default=None, gt=0)  # Added timeline_weeks to the request model
 
 class ProcessingResponse(BaseModel):
     success: bool
@@ -119,10 +120,18 @@ class TemplateManager:
 CONTEXT:
 {{ context }}
 
-USER CONSTRAINTS:
+USER CONSTRAINTS (MUST FOLLOW EXACTLY):
 - Mode: {{ mode }}
 - Available Developers: {{ developer_count }}
-- Budget: {{ currency }} {{ "%.2f"|format(project_budget) }}
+- Budget: {% if project_budget is not none %}{{ currency }} {{ project_budget|round(2) }}{% else %}to be estimated based on project complexity{% endif %}
+- Timeline: {% if timeline_weeks is not none %}EXACTLY {{ timeline_weeks }} weeks{% else %}to be estimated based on project complexity{% endif %} (THIS IS NOT A SUGGESTION - {% if timeline_weeks is not none %}USE THIS EXACT TIMELINE{% else %}Estimate based on project complexity{% endif %})
+- Currency: {{ currency }} (ALL monetary values must be in this currency)
+
+CRITICAL REQUIREMENTS:
+1. {% if timeline_weeks is not none %}The total project duration MUST be exactly {{ timeline_weeks }} weeks, no more, no less{% else %}Estimate project timeline based on complexity{% endif %}
+2. All monetary values must be in {{ currency }} currency
+3. {% if project_budget is not none %}Do not use default values - use only the values provided above{% else %}Estimate budget based on project complexity and requirements{% endif %}
+4. The "Limitations and Constraints" section must be separate from "Project Scope"
 
 Generate a detailed report in MARKDOWN format with these sections:
 # Project Report
@@ -152,33 +161,48 @@ User types and interface requirements
 
 ## 5. Resource Requirements
 ### Human Resources
-Create this markdown table:
-| Role | Experience | Count | Duration(Weeks) | Rate/Hour | Total Cost |
-|-------|------------|--------|---------------|------------|------------|
+Provide a description of the required human resources without using a table format.
+List each role, their experience level, count, duration in weeks, hourly rate, and total cost in paragraph format.
 
 ### Technical Infrastructure
 Servers, cloud services, tools
 
 ### Timeline
-Key phases and milestones
+IMPORTANT: Create a project timeline that {% if timeline_weeks is not none %}MUST span EXACTLY {{ timeline_weeks }} weeks{% else %}should be estimated based on project complexity{% endif %}.
+- {% if timeline_weeks is not none %}The total project duration MUST be {{ timeline_weeks }} weeks, no more, no less{% else %}Estimate the total project duration based on complexity{% endif %}
+- Break down the timeline into phases that fit within {% if timeline_weeks is not none %}the {{ timeline_weeks }} week timeline{% else %}the estimated timeline{% endif %}.
+- Each phase should have specific week ranges that {% if timeline_weeks is not none %}add up to exactly {{ timeline_weeks }} weeks{% else %}sum to the total estimated timeline{% endif %}.
+- Example format:
+  - Phase 1 (Weeks 1-X): [Description]
+  - Phase 2 (Weeks X+1-Y): [Description]
+  - Phase 3 (Weeks Y+1-{% if timeline_weeks is not none %}{{ timeline_weeks }}{% else %}Z{% endif %}): [Description]
 
 ## 6. Implementation Plan
-Phases, milestones, deployment
+Phases, milestones, deployment (aligned with the {% if timeline_weeks is not none %}{{ timeline_weeks }} week{% else %}estimated{% endif %} timeline)
 
 ## 7. Budget & Financial Analysis
 ### Cost Breakdown
-Create this markdown table:
+Create this markdown table with ALL values in {{ currency }}:
 | Category | Estimated Cost |
 |----------|---------------|
 
 ### ROI Analysis
 Return on investment
 
-## 8. Conclusion & Recommendations
+## 8. Costing Analysis
+(Detailed costing analysis will be added here)
+
+## 9. Conclusion & Recommendations
 Key findings and next steps
+
+## 10. Limitations and Constraints
+List items that are explicitly excluded from the project scope and any constraints on the project
 
 Use proper markdown formatting with #, ##, ###, and table syntax.
 IMPORTANT: All monetary values should be in {{ currency }}.
+{% if timeline_weeks is not none %}CRITICAL: The timeline MUST be exactly {{ timeline_weeks }} weeks as specified by the user.{% else %}Estimate the timeline based on project complexity.{% endif %}
+CRITICAL: Do not include any HR tables - only descriptions of HR requirements.
+{% if project_budget is not none %}CRITICAL: Use the provided budget of {{ project_budget }} {{ currency }}{% else %}CRITICAL: Estimate the budget based on project complexity and requirements.{% endif %}
 """)
         
         # Structured data template
@@ -202,22 +226,25 @@ IMPORTANT: All monetary values should be in {{ currency }}.
     "user_roles_ui": "Extract from User Roles & UI"
     },
     "resource_requirements": {
-    "human_resources_table": "Extract the entire markdown table from Human Resources section",
+    "human_resources_description": "Extract the Human Resources description (not a table)",
     "technical_infrastructure": "Extract from Technical Infrastructure",
-    "timeline": "Extract from Timeline"
+    "timeline": "Extract the Timeline section with the exact week ranges"
     },
     "implementation_plan": "Extract from Implementation Plan",
     "budget_analysis": {
     "cost_breakdown_table": "Extract the entire markdown table from Cost Breakdown",
     "roi_analysis": "Extract from ROI Analysis"
     },
-    "conclusion": "Extract from Conclusion & Recommendations"
+    "costing_analysis": "Extract from Costing Analysis section",
+    "conclusion": "Extract from Conclusion & Recommendations",
+    "limitations_constraints": "Extract from Limitations and Constraints section"
 },
 "metadata": {
     "generated_at": "{{ timestamp }}",
     "mode": "{{ mode }}",
     "developer_count": {{ developer_count }},
-    "project_budget": {{ project_budget }},
+    "project_budget": {% if project_budget is not none %}{{ project_budget }}{% else %}null{% endif %},
+    "timeline_weeks": {% if timeline_weeks is not none %}{{ timeline_weeks }}{% else %}null{% endif %},
     "currency": "{{ currency }}"
 }
 }
@@ -277,18 +304,31 @@ class FallbackMarkdownTemplate:
         context = kwargs.get('context', '')
         mode = kwargs.get('mode', 'master')
         developer_count = kwargs.get('developer_count', 1)
-        project_budget = kwargs.get('project_budget', 5000.0)
+        project_budget = kwargs.get('project_budget', None)  # Changed default to None
+        timeline_weeks = kwargs.get('timeline_weeks', None)  # Changed default to None
         currency = kwargs.get('currency', 'USD')
+        
+        # Create budget text based on whether budget is provided
+        budget_text = f"{currency} {project_budget:,.2f}" if project_budget is not None else "to be estimated based on project complexity"
+        timeline_text = f"EXACTLY {timeline_weeks} weeks" if timeline_weeks is not None else "to be estimated based on project complexity"
         
         return f"""You are an expert Business Analyst. Create a comprehensive project report.
 
 CONTEXT:
 {context}
 
-USER CONSTRAINTS:
+USER CONSTRAINTS (MUST FOLLOW EXACTLY):
 - Mode: {mode}
 - Available Developers: {developer_count}
-- Budget: {currency} {project_budget:,.2f}
+- Budget: {budget_text}
+- Timeline: {timeline_text} ({"THIS IS NOT A SUGGESTION - USE THIS EXACT TIMELINE" if timeline_weeks is not None else "Estimate based on project complexity"})
+- Currency: {currency} (ALL monetary values must be in this currency)
+
+CRITICAL REQUIREMENTS:
+1. {"The total project duration MUST be exactly " + str(timeline_weeks) + " weeks, no more, no less" if timeline_weeks is not None else "Estimate project timeline based on complexity"}
+2. All monetary values must be in {currency} currency
+3. {"Do not use default values - use only the values provided above" if project_budget is not None else "Estimate budget based on project complexity and requirements"}
+4. The "Limitations and Constraints" section must be separate from "Project Scope"
 
 Generate a detailed report in MARKDOWN format with these sections:
 # Project Report
@@ -318,33 +358,48 @@ User types and interface requirements
 
 ## 5. Resource Requirements
 ### Human Resources
-Create this markdown table:
-| Role | Experience | Count | Duration(Weeks) | Rate/Hour | Total Cost |
-|-------|------------|--------|---------------|------------|------------|
+Provide a description of the required human resources without using a table format.
+List each role, their experience level, count, duration in weeks, hourly rate, and total cost in paragraph format.
 
 ### Technical Infrastructure
 Servers, cloud services, tools
 
 ### Timeline
-Key phases and milestones
+IMPORTANT: Create a project timeline that {"MUST span EXACTLY " + str(timeline_weeks) + " weeks" if timeline_weeks is not None else "should be estimated based on project complexity"}.
+- {"The total project duration MUST be " + str(timeline_weeks) + " weeks, no more, no less" if timeline_weeks is not None else "Estimate the total project duration based on complexity"}
+- Break down the timeline into phases that fit within {"the " + str(timeline_weeks) + " week timeline" if timeline_weeks is not None else "the estimated timeline"}.
+- Each phase should have specific week ranges that {"add up to exactly " + str(timeline_weeks) + " weeks" if timeline_weeks is not None else "sum to the total estimated timeline"}.
+- Example format:
+  - Phase 1 (Weeks 1-X): [Description]
+  - Phase 2 (Weeks X+1-Y): [Description]
+  - Phase 3 (Weeks Y+1-{"Z" if timeline_weeks is None else timeline_weeks}): [Description]
 
 ## 6. Implementation Plan
-Phases, milestones, deployment
+Phases, milestones, deployment (aligned with the {"estimated" if timeline_weeks is None else str(timeline_weeks) + " week"} timeline)
 
 ## 7. Budget & Financial Analysis
 ### Cost Breakdown
-Create this markdown table:
+Create this markdown table with ALL values in {currency}:
 | Category | Estimated Cost |
 |----------|---------------|
 
 ### ROI Analysis
 Return on investment
 
-## 8. Conclusion & Recommendations
+## 8. Costing Analysis
+(Detailed costing analysis will be added here)
+
+## 9. Conclusion & Recommendations
 Key findings and next steps
+
+## 10. Limitations and Constraints
+List items that are explicitly excluded from the project scope and any constraints on the project
 
 Use proper markdown formatting with #, ##, ###, and table syntax.
 IMPORTANT: All monetary values should be in {currency}.
+{"CRITICAL: The timeline MUST be exactly " + str(timeline_weeks) + " weeks as specified by the user." if timeline_weeks is not None else "Estimate the timeline based on project complexity."}
+CRITICAL: Do not include any HR tables - only descriptions of HR requirements.
+{"CRITICAL: Use the provided budget of " + str(project_budget) + " " + currency if project_budget is not None else "CRITICAL: Estimate the budget based on project complexity and requirements."}
 """
 
 class FallbackStructuredTemplate:
@@ -354,45 +409,49 @@ class FallbackStructuredTemplate:
         timestamp = kwargs.get('timestamp', time.strftime("%Y-%m-%d %H:%M:%S"))
         mode = kwargs.get('mode', 'master')
         developer_count = kwargs.get('developer_count', 1)
-        project_budget = kwargs.get('project_budget', 5000.0)
+        project_budget = kwargs.get('project_budget', None)  # Changed default to None
+        timeline_weeks = kwargs.get('timeline_weeks', None)  # Changed default to None
         currency = kwargs.get('currency', 'USD')
         
         return f"""Based on the report above, extract and format as JSON:
 
-{{
+{
 "title": "Extract the main project title",
-"sections": {{
+"sections": {
     "executive_summary": "Extract key points from Executive Summary",
     "project_scope": "Extract key points from Project Scope",
-    "technical_requirements": {{
+    "technical_requirements": {
     "system_architecture": "Extract from System Architecture",
     "technology_stack": "Extract from Technology Stack",
     "performance_security": "Extract from Performance & Security"
-    }},
-    "functional_requirements": {{
+    },
+    "functional_requirements": {
     "core_features": "Extract from Core Features",
     "user_roles_ui": "Extract from User Roles & UI"
-    }},
-    "resource_requirements": {{
-    "human_resources_table": "Extract the entire markdown table from Human Resources section",
+    },
+    "resource_requirements": {
+    "human_resources_description": "Extract the Human Resources description (not a table)",
     "technical_infrastructure": "Extract from Technical Infrastructure",
-    "timeline": "Extract from Timeline"
-    }},
+    "timeline": "Extract the Timeline section with the exact week ranges"
+    },
     "implementation_plan": "Extract from Implementation Plan",
-    "budget_analysis": {{
+    "budget_analysis": {
     "cost_breakdown_table": "Extract the entire markdown table from Cost Breakdown",
     "roi_analysis": "Extract from ROI Analysis"
-    }},
-    "conclusion": "Extract from Conclusion & Recommendations"
-}},
-"metadata": {{
+    },
+    "costing_analysis": "Extract from Costing Analysis section",
+    "conclusion": "Extract from Conclusion & Recommendations",
+    "limitations_constraints": "Extract from Limitations and Constraints section"
+},
+"metadata": {
     "generated_at": "{timestamp}",
     "mode": "{mode}",
     "developer_count": {developer_count},
     "project_budget": {project_budget},
+    "timeline_weeks": {timeline_weeks},
     "currency": "{currency}"
-}}
-}}
+}
+}
 
 Extract ALL tables and key information accurately. Preserve markdown table format in the extracted fields.
 """
@@ -408,14 +467,17 @@ class CacheManager:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
     
-    def _get_cache_key(self, context: str, mode: str, developer_count: int, project_budget: float, currency: str) -> str:
+    def _get_cache_key(self, context: str, mode: str, developer_count: int, project_budget: Optional[float], timeline_weeks: Optional[int], currency: str) -> str:
         """Generate a cache key based on input parameters"""
-        content = f"{context}_{mode}_{developer_count}_{project_budget}_{currency}"
+        # Handle None values in cache key
+        budget_str = str(project_budget) if project_budget is not None else "none"
+        timeline_str = str(timeline_weeks) if timeline_weeks is not None else "none"
+        content = f"{context}_{mode}_{developer_count}_{budget_str}_{timeline_str}_{currency}"
         return hashlib.md5(content.encode()).hexdigest()
     
-    def get(self, context: str, mode: str, developer_count: int, project_budget: float, currency: str) -> Optional[Dict[str, Any]]:
+    def get(self, context: str, mode: str, developer_count: int, project_budget: Optional[float], timeline_weeks: Optional[int], currency: str) -> Optional[Dict[str, Any]]:
         """Get cached result if available"""
-        cache_key = self._get_cache_key(context, mode, developer_count, project_budget, currency)
+        cache_key = self._get_cache_key(context, mode, developer_count, project_budget, timeline_weeks, currency)
         cache_file = self.cache_dir / f"{cache_key}.json"
         
         if cache_file.exists():
@@ -431,9 +493,9 @@ class CacheManager:
                 ) from e
         return None
     
-    def set(self, context: str, mode: str, developer_count: int, project_budget: float, currency: str, result: Dict[str, Any]) -> None:
+    def set(self, context: str, mode: str, developer_count: int, project_budget: Optional[float], timeline_weeks: Optional[int], currency: str, result: Dict[str, Any]) -> None:
         """Cache a processing result"""
-        cache_key = self._get_cache_key(context, mode, developer_count, project_budget, currency)
+        cache_key = self._get_cache_key(context, mode, developer_count, project_budget, timeline_weeks, currency)
         cache_file = self.cache_dir / f"{cache_key}.json"
         
         try:
@@ -584,12 +646,53 @@ class DocumentProcessor:
                 details={"file_path": file_path, "error": str(e)}
             ) from e
     
+    def _extract_json_from_text(self, text: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON from text that might contain markdown or other formatting"""
+        # First, try to find JSON between triple backticks
+        json_match = re.search(r'```(?:json)?\s*({.*?})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # If that fails, try to find JSON object directly in the text
+        json_match = re.search(r'({.*})', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # If all else fails, return None
+        return None
+    
+    def _enforce_timeline_constraint(self, markdown_report: str, timeline_weeks: Optional[int]) -> str:
+        """Enforce user-specified timeline in the markdown report"""
+        if timeline_weeks is None:
+            return markdown_report
+            
+        # Replace any default timeline values with the user-specified timeline
+        import re
+        
+        # Replace patterns like "10 weeks" with the user-specified timeline
+        markdown_report = re.sub(r'\d+\s+weeks', f"{timeline_weeks} weeks", markdown_report)
+        markdown_report = re.sub(r'\d+\s+week', f"{timeline_weeks} week", markdown_report)
+        
+        # Specifically replace common default values
+        markdown_report = markdown_report.replace("8 weeks", f"{timeline_weeks} weeks")
+        markdown_report = markdown_report.replace("10 weeks", f"{timeline_weeks} weeks")
+        markdown_report = markdown_report.replace("12 weeks", f"{timeline_weeks} weeks")
+        
+        return markdown_report
+    
     async def generate_dual_output(
         self,
         context: str,
         mode: str,
         developer_count: int,
-        project_budget: float,
+        project_budget: Optional[float],
+        timeline_weeks: Optional[int],
         currency: str = "USD"
     ) -> Tuple[str, Dict[str, Any]]:
         """
@@ -598,7 +701,7 @@ class DocumentProcessor:
         """
         # Check cache first (only if cache_manager exists)
         if self.cache_manager:
-            cached_result = self.cache_manager.get(context, mode, developer_count, project_budget, currency)
+            cached_result = self.cache_manager.get(context, mode, developer_count, project_budget, timeline_weeks, currency)
             if cached_result:
                 logger.info("Using cached result")
                 return cached_result["markdown"], cached_result["structured"]
@@ -612,6 +715,7 @@ class DocumentProcessor:
                     mode=mode,
                     developer_count=developer_count,
                     project_budget=project_budget,
+                    timeline_weeks=timeline_weeks,
                     currency=currency
                 )
             else:
@@ -621,10 +725,18 @@ class DocumentProcessor:
 CONTEXT:
 {context}
 
-USER CONSTRAINTS:
+USER CONSTRAINTS (MUST FOLLOW EXACTLY):
 - Mode: {mode}
 - Available Developers: {developer_count}
-- Budget: {currency} {project_budget:,.2f}
+- Budget: {f"{currency} {project_budget:,.2f}" if project_budget is not None else "to be estimated based on project complexity"}
+- Timeline: {f"EXACTLY {timeline_weeks} weeks" if timeline_weeks is not None else "to be estimated based on project complexity"} ({"THIS IS NOT A SUGGESTION - USE THIS EXACT TIMELINE" if timeline_weeks is not None else "Estimate based on project complexity"})
+- Currency: {currency} (ALL monetary values must be in this currency)
+
+CRITICAL REQUIREMENTS:
+1. {"The total project duration MUST be exactly " + str(timeline_weeks) + " weeks, no more, no less" if timeline_weeks is not None else "Estimate project timeline based on complexity"}
+2. All monetary values must be in {currency} currency
+3. {"Do not use default values - use only the values provided above" if project_budget is not None else "Estimate budget based on project complexity and requirements"}
+4. The "Limitations and Constraints" section must be separate from "Project Scope"
 
 Generate a detailed report in MARKDOWN format with these sections:
 # Project Report
@@ -654,31 +766,48 @@ User types and interface requirements
 
 ## 5. Resource Requirements
 ### Human Resources
-Humanresource for the project.
+Provide a description of the required human resources without using a table format.
+List each role, their experience level, count, duration in weeks, hourly rate, and total cost in paragraph format.
 
 ### Technical Infrastructure
 Servers, cloud services, tools
 
 ### Timeline
-Key phases and milestones
+IMPORTANT: Create a project timeline that {"MUST span EXACTLY " + str(timeline_weeks) + " weeks" if timeline_weeks is not None else "should be estimated based on project complexity"}.
+- {"The total project duration MUST be " + str(timeline_weeks) + " weeks, no more, no less" if timeline_weeks is not None else "Estimate the total project duration based on complexity"}
+- Break down the timeline into phases that fit within {"the " + str(timeline_weeks) + " week timeline" if timeline_weeks is not None else "the estimated timeline"}.
+- Each phase should have specific week ranges that {"add up to exactly " + str(timeline_weeks) + " weeks" if timeline_weeks is not None else "sum to the total estimated timeline"}.
+- Example format:
+  - Phase 1 (Weeks 1-X): [Description]
+  - Phase 2 (Weeks X+1-Y): [Description]
+  - Phase 3 (Weeks Y+1-{"Z" if timeline_weeks is None else timeline_weeks}): [Description]
 
 ## 6. Implementation Plan
-Phases, milestones, deployment
+Phases, milestones, deployment (aligned with the {"estimated" if timeline_weeks is None else str(timeline_weeks) + " week"} timeline)
 
 ## 7. Budget & Financial Analysis
 ### Cost Breakdown
-Create this markdown table:
+Create this markdown table with ALL values in {currency}:
 | Category | Estimated Cost |
 |----------|---------------|
 
 ### ROI Analysis
 Return on investment
 
-## 8. Conclusion & Recommendations
+## 8. Costing Analysis
+(Detailed costing analysis will be added here)
+
+## 9. Conclusion & Recommendations
 Key findings and next steps
+
+## 10. Limitations and Constraints
+List items that are explicitly excluded from the project scope and any constraints on the project
 
 Use proper markdown formatting with #, ##, ###, and table syntax.
 IMPORTANT: All monetary values should be in {currency}.
+{"CRITICAL: The timeline MUST be exactly " + str(timeline_weeks) + " weeks as specified by the user." if timeline_weeks is not None else "Estimate the timeline based on project complexity."}
+CRITICAL: Do not include any HR tables - only descriptions of HR requirements.
+{"CRITICAL: Use the provided budget of " + str(project_budget) + " " + currency if project_budget is not None else "CRITICAL: Estimate the budget based on project complexity and requirements."}
 """
             
             logger.info("🤖 Generating markdown report...")
@@ -693,6 +822,13 @@ IMPORTANT: All monetary values should be in {currency}.
             if markdown_report.endswith('```'):
                 markdown_report = markdown_report[:-3].strip()
             
+            # Enforce user-specified timeline
+            markdown_report = self._enforce_timeline_constraint(markdown_report, timeline_weeks)
+            
+            # Verify timeline is correct
+            if timeline_weeks is not None and (f"{timeline_weeks} weeks" not in markdown_report and f"{timeline_weeks} week" not in markdown_report):
+                logger.warning(f"⚠️ Timeline may not be set correctly to {timeline_weeks} weeks")
+            
             # Second call: Extract structured data from the same report
             if self.template_manager:
                 structured_template = self.template_manager.render_template(
@@ -701,46 +837,50 @@ IMPORTANT: All monetary values should be in {currency}.
                     mode=mode,
                     developer_count=developer_count,
                     project_budget=project_budget,
+                    timeline_weeks=timeline_weeks,
                     currency=currency
                 )
             else:
                 # Use fallback template
                 structured_template = f"""Based on the report above, extract and format as JSON:
 
-{{
+{
 "title": "Extract the main project title",
-"sections": {{
+"sections": {
     "executive_summary": "Extract key points from Executive Summary",
     "project_scope": "Extract key points from Project Scope",
-    "technical_requirements": {{
+    "technical_requirements": {
     "system_architecture": "Extract from System Architecture",
     "technology_stack": "Extract from Technology Stack",
     "performance_security": "Extract from Performance & Security"
-    }},
-    "functional_requirements": {{
+    },
+    "functional_requirements": {
     "core_features": "Extract from Core Features",
     "user_roles_ui": "Extract from User Roles & UI"
-    }},
-    "resource_requirements": {{
-    "human_resources_table": "Extract the Human Resources section",
+    },
+    "resource_requirements": {
+    "human_resources_description": "Extract the Human Resources description (not a table)",
     "technical_infrastructure": "Extract from Technical Infrastructure",
-    "timeline": "Extract from Timeline"
-    }},
+    "timeline": "Extract the Timeline section with the exact week ranges"
+    },
     "implementation_plan": "Extract from Implementation Plan",
-    "budget_analysis": {{
+    "budget_analysis": {
     "cost_breakdown_table": "Extract the entire markdown table from Cost Breakdown",
     "roi_analysis": "Extract from ROI Analysis"
-    }},
-    "conclusion": "Extract from Conclusion & Recommendations"
-}},
-"metadata": {{
+    },
+    "costing_analysis": "Extract from Costing Analysis section",
+    "conclusion": "Extract from Conclusion & Recommendations",
+    "limitations_constraints": "Extract from Limitations and Constraints section"
+},
+"metadata": {
     "generated_at": "{time.strftime("%Y-%m-%d %H:%M:%S")}",
     "mode": "{mode}",
     "developer_count": {developer_count},
     "project_budget": {project_budget},
+    "timeline_weeks": {timeline_weeks},
     "currency": "{currency}"
-}}
-}}
+}
+}
 
 Extract ALL tables and key information accurately. Preserve markdown table format in the extracted fields.
 """
@@ -754,9 +894,11 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
             logger.info("🔍 Extracting structured data...")
             structured_response = await asyncio.to_thread(self.chat.invoke, structured_prompt)
             
+            # Try to parse the structured response as JSON
             try:
-                # Try to parse the structured response as JSON
-                structured_data = json.loads(structured_response.content.strip())
+                structured_data = self._extract_json_from_text(structured_response.content.strip())
+                if structured_data is None:
+                    raise json.JSONDecodeError("Could not extract JSON from response", structured_response.content, 0)
                 logger.info("✅ Successfully extracted structured data")
             except json.JSONDecodeError:
                 # Fallback: create minimal structure
@@ -772,6 +914,7 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
                         "mode": mode,
                         "developer_count": developer_count,
                         "project_budget": project_budget,
+                        "timeline_weeks": timeline_weeks,
                         "currency": currency
                     }
                 }
@@ -782,7 +925,7 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
                 "structured": structured_data
             }
             if self.cache_manager:
-                self.cache_manager.set(context, mode, developer_count, project_budget, currency, result)
+                self.cache_manager.set(context, mode, developer_count, project_budget, timeline_weeks, currency, result)
             
             return markdown_report, structured_data
             
@@ -799,14 +942,14 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
         input_file: str,
         output_file: Optional[str] = None,
         mode: str = "master",
-        developer_count: int = 1,
-        project_budget: float = 5000.0,
+        developer_count: Optional[int] = None,  # Changed to Optional
+        project_budget: Optional[float] = None,  # Changed to Optional
+        timeline_weeks: Optional[int] = None,  # Changed to Optional
         development_scope: str = "local",
         currency: str = "USD",
         project_type: str = "web_app",
-        technical_hourly_rate: float = 50.0,
-        non_technical_hourly_rate: float = 40.0,
-        timeline_weeks: int = 12,
+        technical_hourly_rate: Optional[float] = None,  # Changed to Optional
+        non_technical_hourly_rate: Optional[float] = None,  # Changed to Optional
         instruction: str = "",
         **kwargs
     ) -> Dict[str, Any]:
@@ -817,6 +960,9 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
             raise FileNotFoundError(f"Input file not found: {input_file}")
         
         logger.info(f"🚀 Processing document: {input_file}")
+        logger.info(f"📅 Using timeline: {'estimated by LLM' if timeline_weeks is None else timeline_weeks} weeks")
+        logger.info(f"💰 Using currency: {currency}")
+        logger.info(f"💸 Using budget: {'estimated by LLM' if project_budget is None else project_budget}")
         
         # Load document
         context = await self.load_document(input_file)
@@ -825,8 +971,9 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
         markdown_report, structured_data = await self.generate_dual_output(
             context=context,
             mode=mode,
-            developer_count=developer_count,
-            project_budget=project_budget,
+            developer_count=developer_count or 1,  # Use 1 as fallback only for internal processing
+            project_budget=project_budget,  # Pass None if not provided
+            timeline_weeks=timeline_weeks,  # Pass None if not provided
             currency=currency
         )
         
@@ -841,33 +988,52 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
                     development_scope=development_scope,
                     currency=currency,
                     project_type=project_type,
-                    developer_count=developer_count,
-                    project_budget=project_budget,
-                    technical_hourly_rate=technical_hourly_rate,
-                    non_technical_hourly_rate=non_technical_hourly_rate,
-                    timeline_weeks=timeline_weeks
+                    developer_count=developer_count,  # Pass None if not provided
+                    project_budget=project_budget,  # Pass None if not provided
+                    technical_hourly_rate=technical_hourly_rate,  # Pass None if not provided
+                    non_technical_hourly_rate=non_technical_hourly_rate,  # Pass None if not provided
+                    timeline_weeks=timeline_weeks,  # Pass None if not provided
                 )
                 
-                # Add costing data as clean JSON without markdown formatting
+                # Add costing data at section 8 (before conclusion)
                 if costing_data and "items" in costing_data:
-                    markdown_report += "\n\n## 9. Costing Analysis\n\n"
+                    # Find the position to insert the costing analysis (before "## 9. Conclusion & Recommendations")
+                    conclusion_pos = markdown_report.find("## 9. Conclusion & Recommendations")
                     
-                    # Create markdown table
-                    markdown_report += "### Resource Requirements\n\n"
-                    markdown_report += "| Role | Quantity | Hourly Rate | Duration | Subtotal |\n"
-                    markdown_report += "|------|----------|-------------|----------|----------|\n"
+                    if conclusion_pos == -1:
+                        # Try alternative conclusion headings
+                        conclusion_pos = markdown_report.find("## Conclusion")
+                    
+                    if conclusion_pos == -1:
+                        # Try to find any conclusion section
+                        conclusion_pos = markdown_report.lower().find("## conclusion")
+                    
+                    # Create the costing analysis section
+                    costing_section = "\n\n## 8. Costing Analysis\n\n"
+                    
+                    # Create markdown table with user-specific currency
+                    costing_section += "### Resource Requirements\n\n"
+                    costing_section += "| Role | Quantity | Hourly Rate | Duration | Subtotal |\n"
+                    costing_section += "|------|----------|-------------|----------|----------|\n"
                     
                     for item in costing_data["items"]:
                         name = item.get("role", "Unknown")
                         qty = item.get("quantity", 1)
                         rate = item.get("hourly_rate", 0)
-                        duration = item.get("duration_weeks", 12)
+                        duration = item.get("duration_weeks", timeline_weeks or 12)
                         subtotal = item.get("subtotal", 0)
-                        markdown_report += f"| {name} | {qty} | {currency} {rate:.2f} | {duration} weeks | {currency} {subtotal:,.2f} |\n"
+                        costing_section += f"| {name} | {qty} | {currency} {rate:.2f} | {duration} weeks | {currency} {subtotal:,.2f} |\n"
                     
-                    # Add total
+                    # Add total with user-specific currency
                     if "total_estimated_cost" in costing_data:
-                        markdown_report += f"\n**Total Estimated Cost: {currency} {costing_data['total_estimated_cost']:,.2f}**\n"
+                        costing_section += f"\n**Total Estimated Cost: {currency} {costing_data['total_estimated_cost']:,.2f}**\n"
+                    
+                    # Insert the costing section before the conclusion if found
+                    if conclusion_pos != -1:
+                        markdown_report = markdown_report[:conclusion_pos] + costing_section + "\n\n" + markdown_report[conclusion_pos:]
+                    else:
+                        # If conclusion section not found, append at the end
+                        markdown_report += costing_section
                     
             except Exception as e:
                 logger.error(f"Error generating costing: {e}")
@@ -875,6 +1041,15 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
                     "error": "Failed to generate costing",
                     "details": str(e)
                 }
+        
+        # Verify that the timeline is correctly set in the markdown report
+        if timeline_weeks is not None and (f"{timeline_weeks} weeks" not in markdown_report and f"{timeline_weeks} week" not in markdown_report):
+            logger.warning(f"⚠️ Timeline may not be set correctly to {timeline_weeks} weeks")
+            # Try to find and replace any default timeline values
+            import re
+            # Replace patterns like "10 weeks" with the user-specified timeline
+            markdown_report = re.sub(r'\d+\s+weeks', f"{timeline_weeks} weeks", markdown_report)
+            markdown_report = re.sub(r'\d+\s+week', f"{timeline_weeks} week", markdown_report)
         
         # Prepare response
         response = {
@@ -898,7 +1073,9 @@ Extract ALL tables and key information accurately. Preserve markdown table forma
                     "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "processing_time": "fast",
                     "mode": mode,
-                    "currency": currency
+                    "currency": currency,
+                    "timeline_weeks": timeline_weeks,
+                    "project_budget": project_budget
                 }
             }
         }

@@ -66,9 +66,15 @@ async def process_document_api(
         text_content: Text content as alternative to file upload
         input_mode: Either 'file' or 'text'
         instruction: Optional instruction for processing
-        mode: Processing mode ('master' or 'mvp')
-        developer_count: Number of developers available
-        project_budget: Available budget
+        mode: Processing mode ('master')
+        development_scope: Development scope ('local' or 'international')
+        currency: Currency code ('PKR', 'USD', 'EUR')
+        project_type: Type of project ('web_app', 'android_app', etc.)
+        technical_hourly_rate: Hourly rate for technical resources
+        non_technical_hourly_rate: Hourly rate for non-technical resources
+        timeline_weeks: Project timeline in weeks
+        fixed_budget: Fixed budget for the project
+        resources_needed: Number of resources needed
     
     Returns:
         ProcessingResponse with document details and dual output
@@ -111,9 +117,51 @@ async def process_document_api(
         else:
             raise HTTPException(status_code=400, detail="Invalid input mode. Must be 'file' or 'text'.")
         
-        # Convert string parameters to appropriate types
-        developer_count = int(resources_needed) if resources_needed and resources_needed.strip() else 1
-        project_budget = float(fixed_budget) if fixed_budget and fixed_budget.strip() else 5000.0
+    
+# Convert string parameters to appropriate types with proper validation
+        try:
+            developer_count = int(resources_needed) if resources_needed and resources_needed.strip() else 1
+            if developer_count <= 0:
+                raise ValueError("Developer count must be positive")
+        except ValueError:
+            logger.warning(f"Invalid resources_needed value: {resources_needed}, using default 1")
+            developer_count = 1
+
+        try:
+            # Don't set default budget - let LLM estimate based on complexity
+            project_budget = float(fixed_budget) if fixed_budget and fixed_budget.strip() else None
+            if project_budget is not None and project_budget <= 0:
+                raise ValueError("Project budget must be positive")
+        except ValueError:
+                logger.warning(f"Invalid fixed_budget value: {fixed_budget}, letting LLM estimate budget")
+                project_budget = None
+
+        try:
+            weeks = int(timeline_weeks) if timeline_weeks and timeline_weeks.strip() else None
+            if weeks is not None and weeks <= 0:
+                raise ValueError("Timeline weeks must be positive")
+        except ValueError:
+            logger.warning(f"Invalid timeline_weeks value: {timeline_weeks}, letting LLM estimate timeline")
+            weeks = None
+
+        try:
+            tech_rate = float(technical_hourly_rate) if technical_hourly_rate and technical_hourly_rate.strip() else None
+            if tech_rate is not None and tech_rate <= 0:
+                raise ValueError("Technical hourly rate must be positive")
+        except ValueError:
+            logger.warning(f"Invalid technical_hourly_rate value: {technical_hourly_rate}, letting LLM estimate rate")
+            tech_rate = None
+
+        try:
+            non_tech_rate = float(non_technical_hourly_rate) if non_technical_hourly_rate and non_technical_hourly_rate.strip() else None
+            if non_tech_rate is not None and non_tech_rate <= 0:
+                raise ValueError("Non-technical hourly rate must be positive")
+        except ValueError:
+            logger.warning(f"Invalid non_technical_hourly_rate value: {non_technical_hourly_rate}, letting LLM estimate rate")
+            non_tech_rate = None
+
+        # Log the parameters for debugging
+        logger.info(f"Processing with parameters: developer_count={developer_count}, project_budget={'estimated by LLM' if project_budget is None else project_budget}, timeline_weeks={'estimated by LLM' if weeks is None else weeks}, currency={currency}")
         
         # Process the document
         result = await document_processor.process_document(
@@ -124,9 +172,9 @@ async def process_document_api(
             development_scope=development_scope,
             currency=currency,
             project_type=project_type,
-            technical_hourly_rate=float(technical_hourly_rate) if technical_hourly_rate and technical_hourly_rate.strip() else 50.0,
-            non_technical_hourly_rate=float(non_technical_hourly_rate) if non_technical_hourly_rate and non_technical_hourly_rate.strip() else 40.0,
-            timeline_weeks=int(timeline_weeks) if timeline_weeks and timeline_weeks.strip() else 12,
+            technical_hourly_rate=tech_rate,
+            non_technical_hourly_rate=non_tech_rate,
+            timeline_weeks=weeks,
             instruction=instruction
         )
         
@@ -170,6 +218,7 @@ async def process_document_api(
             },
             processing_time=round(processing_time, 2)
         )
+
 @app.get("/reports/{report_id}.pdf")
 async def get_report(report_id: str):
     """Serve the generated PDF report"""
